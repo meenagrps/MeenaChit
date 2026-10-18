@@ -607,7 +607,13 @@ async function checkAndRunAutoDispatch() {
             cachedWindowKey = expectedWindowKey;
             const pending = state.pendingGroups || [];
             const activeGroup = state.currentProcessingGroup;
-            if (activeGroup || pending.length > 0) {
+
+            const manualSnap = await MANUAL_STATE_REF.get();
+            const manualState = manualSnap.exists ? manualSnap.data() : {};
+            const manualPending = manualState.pendingGroups || [];
+            const manualActive = manualState.currentProcessingGroup;
+
+            if (activeGroup || pending.length > 0 || manualActive || manualPending.length > 0) {
                 triggerMasterQueue();
             }
             return;
@@ -902,17 +908,35 @@ async function processOneGroup(queueType, STATE_REF) {
 // --- 8. MANUAL COMMAND INGESTION HANDLERS ---
 async function handleChitfundsDispatch(groupId, requesterPhone) {
     try {
-        const groupSnap = await db.collection('groups').doc(groupId).get();
+        let resolvedGroupId = groupId;
+        let groupSnap = await db.collection('groups').doc(resolvedGroupId).get();
+
+        // Fallback 1: Instant Uppercase Resolution (e.g., "mmm2l" -> "MMM2L")
+        if (!groupSnap.exists && resolvedGroupId !== resolvedGroupId.toUpperCase()) {
+            resolvedGroupId = resolvedGroupId.toUpperCase();
+            groupSnap = await db.collection('groups').doc(resolvedGroupId).get();
+        }
+
+        // Fallback 2: Case-Insensitive Document Match across groups collection
+        if (!groupSnap.exists) {
+            const allGroupsSnap = await db.collection('groups').get();
+            const matchedDoc = allGroupsSnap.docs.find(d => d.id.toLowerCase() === groupId.toLowerCase());
+            if (matchedDoc) {
+                resolvedGroupId = matchedDoc.id;
+                groupSnap = matchedDoc;
+            }
+        }
+
         if (!groupSnap.exists) {
             await sendFreeTextMessage(requesterPhone, `❌ *Group Not Found*\nNo chit group exists with ID: @${groupId}`);
             return;
         }
 
         await MANUAL_STATE_REF.set({
-            pendingGroups: FieldValue.arrayUnion(groupId)
+            pendingGroups: FieldValue.arrayUnion(resolvedGroupId)
         }, { merge: true });
 
-        await sendFreeTextMessage(requesterPhone, `⏳ *Queued*\nGroup @${groupId} safely injected into the Manual Queue.\n\n*Note:* The Master Engine respects Priority execution. If Auto-Tasks are running, this group will automatically execute once they finish.`);
+        await sendFreeTextMessage(requesterPhone, `⏳ *Queued*\nGroup @${resolvedGroupId} safely injected into the Manual Queue.\n\n*Note:* The Master Engine respects Priority execution. If Auto-Tasks are running, this group will automatically execute once they finish.`);
         
         triggerMasterQueue();
     } catch (err) {
@@ -1055,7 +1079,7 @@ async function runAutomatedGSTCheck(isBootUp = false) {
         if (data.currentMonth === reportingMonthStr && (data.status === "SENT" || data.status === "COMPLIANCE_HALT")) return; 
 
         const lastUpdated = data.updatedAt ? new Date(data.updatedAt) : new Date(0);
-        const minutesSinceUpdate = (istNow - lastUpdated) / (1000 * 60);
+        const minutesSinceUpdate = (Date.now() - lastUpdated.getTime()) / (1000 * 60);
 
         if (data.currentMonth === reportingMonthStr && data.status === "PROCESSING") {
             if (minutesSinceUpdate < 15) return; 
@@ -1065,7 +1089,7 @@ async function runAutomatedGSTCheck(isBootUp = false) {
         await docRef.set({
             currentMonth: reportingMonthStr,
             status: "PROCESSING",
-            updatedAt: istNow.toISOString()
+            updatedAt: new Date().toISOString()
         });
 
         const adminPhone = await getAdminPhoneTarget();
@@ -1260,14 +1284,14 @@ app.post('/webhook', async (req, res) => {
                             `🔒 *Process Lock:* ${isManualGenerating ? 'ACTIVE (BUSY)' : 'IDLE (READY)'}\n` +
                             `📈 *Reports Served:* ${systemTelemetry.requestsHandled}`;
                         await sendFreeTextMessage(senderPhone, reply);
-                        return;
+                        continue;
                     }
 
                     // GST MANUAL COMMANDS
                     const gstMatch = messageText.match(/^(force\s+)?gst\s+report(?:\s+(.+))?$/i);
                     if (gstMatch) {
                         await handleManualGSTCommand(senderPhone, gstMatch);
-                        return;
+                        continue;
                     }
 
                     const adminRegex = /^(?:chitfunds\s+)?change admin number\s+(.+)$/i;
@@ -1282,7 +1306,7 @@ app.post('/webhook', async (req, res) => {
                         } else {
                             await sendFreeTextMessage(senderPhone, `❌ Invalid phone number format. Please provide a valid 10-digit number.`);
                         }
-                        return;
+                        continue;
                     }
 
                     if (messageText.toLowerCase() === 'chitfunds stop') {
@@ -1296,13 +1320,13 @@ app.post('/webhook', async (req, res) => {
                         }, { merge: true });
 
                         await sendFreeTextMessage(senderPhone, `🛑 *System Halted*\nManual queue cleared. Automated queue paused. Existing tasks are breaking out of loops safely.`);
-                        return;
+                        continue;
                     }
 
                     if (messageText.toLowerCase() === 'chitfunds pause') {
                         isAutoDispatchPaused = true;
                         await sendFreeTextMessage(senderPhone, `⏸ *System Paused*\nThe Master Queue will not execute any groups until resumed.`);
-                        return;
+                        continue;
                     }
                     if (messageText.toLowerCase() === 'chitfunds resume') {
                         isAutoDispatchPaused = false;
@@ -1313,7 +1337,7 @@ app.post('/webhook', async (req, res) => {
                             await sendFreeTextMessage(senderPhone, `▶️ *System Resumed*\nChecking Master Queue priorities...`);
                             triggerMasterQueue(); 
                         }
-                        return;
+                        continue;
                     }
 
                     if (messageText.toLowerCase() === 'chitfunds all' || messageText.toLowerCase() === 'auto chitfunds all') {
@@ -1321,15 +1345,15 @@ app.post('/webhook', async (req, res) => {
                         globalCancelFlag = false;
                         isAutoDispatchPaused = false;
                         await handleGlobalChitfundsDispatch(senderPhone);
-                        return;
+                        continue;
                     }
 
-                    const triggerRegex = /^chitfunds\s+([A-Za-z0-9_-]+)/i;
+                    const triggerRegex = /^chitfunds\s+@?([A-Za-z0-9_-]+)/i;
                     const match = messageText.match(triggerRegex);
 
-                    if (!match) return;
+                    if (!match) continue;
 
-                    const targetGroupId = match[1].trim();
+                    const targetGroupId = match[1].trim().toUpperCase();
                     console.log(`[TRIGGER] Received Chitfunds command for group: "${targetGroupId}" from ${senderPhone}`);
                     globalCancelFlag = false;
                     isAutoDispatchPaused = false;
