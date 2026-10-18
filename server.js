@@ -762,6 +762,7 @@ async function processOneGroup(queueType, STATE_REF) {
             const expectedUserMonth = calculateParticipantExpectedMonth(user, groupData);
             const snap = snapshotMap.get(user.id) || { monthsPaid: 0 };
             const monthsPaid = snap.monthsPaid || 0;
+            const partialPaid = snap.partialPaidAmount || 0; // ZERO READ MEMORY EXTRACTION
             
             if (monthsPaid < expectedUserMonth) {
                 let totalOwed = 0;
@@ -769,8 +770,22 @@ async function processOneGroup(queueType, STATE_REF) {
 
                 for (let m = monthsPaid + 1; m <= expectedUserMonth; m++) {
                     const dueForM = calculateDueForMonth(m, startAmt, schedule);
-                    totalOwed += dueForM;
-                    pendingMonthsList.push({ month: m, amount: dueForM });
+                    
+                    // PARTIAL PAYMENT UPGRADE INJECTION
+                    if (m === monthsPaid + 1 && partialPaid > 0) {
+                        const balance = dueForM - partialPaid;
+                        totalOwed += balance;
+                        pendingMonthsList.push({ 
+                            month: m, 
+                            amount: balance,
+                            isPartial: true,
+                            target: dueForM,
+                            received: partialPaid
+                        });
+                    } else {
+                        totalOwed += dueForM;
+                        pendingMonthsList.push({ month: m, amount: dueForM, isPartial: false });
+                    }
                 }
 
                 const targetPhone = formatIndianPhoneNumber(user.phone);
@@ -778,8 +793,16 @@ async function processOneGroup(queueType, STATE_REF) {
 
                 groupPendingTotal += totalOwed;
                 let breakdownArray = [];
-                pendingMonthsList.forEach(pm => { breakdownArray.push(`Month ${pm.month} (₹${pm.amount.toLocaleString('en-IN')})`); });
-                let breakdownText = breakdownArray.join(', ');
+                
+                pendingMonthsList.forEach(pm => { 
+                    if (pm.isPartial) {
+                        breakdownArray.push(`Month ${pm.month} (₹${pm.target.toLocaleString('en-IN')} Target, ₹${pm.received.toLocaleString('en-IN')} Received, Remaining: ₹${pm.amount.toLocaleString('en-IN')})`);
+                    } else {
+                        breakdownArray.push(`Month ${pm.month} (₹${pm.amount.toLocaleString('en-IN')})`);
+                    }
+                });
+                
+                let breakdownText = breakdownArray.join('\n');
 
                 const participantName = (user.name || 'Participant').toUpperCase();
                 const groupName = (groupData.groupName || groupId).toUpperCase();
