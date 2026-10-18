@@ -13,7 +13,7 @@
  * 8. Global Priority Engine: Auto-Dispatch Runs First, Manual Queues Second.
  * 9. Individualized Sequential Math Engine (No Global Timeline Traps).
  * 10. Dual JIT Checkpoint Architecture (Isolated Auto & Manual State Management).
- * 11. Meta-Compliant Rate Controls (5-10s member pacing, 1m inter-group settle).
+ * 11. Meta-Compliant Rate Controls (4-6s member pacing, 1m inter-group settle).
  * 12. Quiet Hours (11 PM - 6 AM IST) with Mid-Loop Cutoff and Manual Overrides.
  * 13. Dynamic Admin Phone Engine & Pre-Approved Meta Utility Templates.
  * 14. Verification Handshake (GET /webhook) & Event Listener (POST /webhook).
@@ -652,6 +652,7 @@ async function triggerMasterQueue() {
         while (!globalCancelFlag && !isAutoDispatchPaused) {
             if (isQuietHours()) {
                 console.log('[MASTER ENGINE] Quiet hours active. Pausing engine until 6:00 AM.');
+                cachedWindowKey = null; // Clear RAM cache so 6:00 AM cron re-checks Firestore and resumes
                 break;
             }
 
@@ -763,6 +764,7 @@ async function processOneGroup(queueType, STATE_REF) {
             const snap = snapshotMap.get(user.id) || { monthsPaid: 0 };
             const monthsPaid = snap.monthsPaid || 0;
             const partialPaid = snap.partialPaidAmount || 0; // ZERO READ MEMORY EXTRACTION
+            const targetPartialMonth = snap.partialPaidMonth || (monthsPaid + 1);
             
             if (monthsPaid < expectedUserMonth) {
                 let totalOwed = 0;
@@ -772,8 +774,8 @@ async function processOneGroup(queueType, STATE_REF) {
                     const dueForM = calculateDueForMonth(m, startAmt, schedule);
                     
                     // PARTIAL PAYMENT UPGRADE INJECTION
-                    if (m === monthsPaid + 1 && partialPaid > 0) {
-                        const balance = dueForM - partialPaid;
+                    if (m === targetPartialMonth && partialPaid > 0) {
+                        const balance = Math.max(0, dueForM - partialPaid);
                         totalOwed += balance;
                         pendingMonthsList.push({ 
                             month: m, 
@@ -791,18 +793,18 @@ async function processOneGroup(queueType, STATE_REF) {
                 const targetPhone = formatIndianPhoneNumber(user.phone);
                 if (!targetPhone) continue;
 
-                groupPendingTotal += totalOwed;
                 let breakdownArray = [];
                 
                 pendingMonthsList.forEach(pm => { 
                     if (pm.isPartial) {
-                        breakdownArray.push(`Month ${pm.month} (₹${pm.target.toLocaleString('en-IN')} Target, ₹${pm.received.toLocaleString('en-IN')} Received, Remaining: ₹${pm.amount.toLocaleString('en-IN')})`);
+                        breakdownArray.push(`• Month ${pm.month} (₹${pm.target.toLocaleString('en-IN')} Target, ₹${pm.received.toLocaleString('en-IN')} Received, Remaining: ₹${pm.amount.toLocaleString('en-IN')})`);
                     } else {
-                        breakdownArray.push(`Month ${pm.month} (₹${pm.amount.toLocaleString('en-IN')})`);
+                        breakdownArray.push(`• Month ${pm.month} (₹${pm.amount.toLocaleString('en-IN')})`);
                     }
                 });
                 
-                let breakdownText = breakdownArray.join('\n');
+                // Meta-compliant inline separator (no \n inside template body parameters)
+                let breakdownText = breakdownArray.join(', ');
 
                 const participantName = (user.name || 'Participant').toUpperCase();
                 const groupName = (groupData.groupName || groupId).toUpperCase();
@@ -814,7 +816,8 @@ async function processOneGroup(queueType, STATE_REF) {
                     groupName: groupName,
                     timeline: `${expectedUserMonth} of ${groupData.totalMonths || 0}`,
                     breakdown: breakdownText.trim(),
-                    amount: totalOwed.toLocaleString('en-IN')
+                    amount: totalOwed.toLocaleString('en-IN'),
+                    rawAmount: totalOwed
                 });
             }
         }
@@ -836,6 +839,7 @@ async function processOneGroup(queueType, STATE_REF) {
 
         for (let i = 0; i < filteredDispatchQueue.length; i++) {
             if (globalCancelFlag || isAutoDispatchPaused || isQuietHours()) {
+                if (isQuietHours()) cachedWindowKey = null;
                 return; 
             }
 
@@ -850,6 +854,7 @@ async function processOneGroup(queueType, STATE_REF) {
                     userId: item.id
                 });
                 successCount++;
+                groupPendingTotal += (item.rawAmount || 0);
                 console.log(`[${queueType}] Template sent to ${item.name} (${item.phone})`);
             } catch (sendErr) {
                 console.error(`[DISPATCH ERROR] Failed sending to ${item.phone}:`, sendErr.message);
@@ -859,8 +864,8 @@ async function processOneGroup(queueType, STATE_REF) {
             }
 
             if (i < filteredDispatchQueue.length - 1) {
-                console.log(`[${queueType}] Pacing dispatch: waiting 5-10 seconds before next recipient...`);
-                let interrupted = await interruptibleWaitSeconds(5, 10, 'RECIPIENT PACING');
+                console.log(`[${queueType}] Pacing dispatch: waiting 4-6 seconds before next recipient...`);
+                let interrupted = await interruptibleWaitSeconds(4, 6, 'RECIPIENT PACING');
                 if (interrupted) return;
             }
         }
@@ -1047,7 +1052,7 @@ async function runAutomatedGSTCheck(isBootUp = false) {
         const docSnap = await docRef.get();
         let data = docSnap.exists ? docSnap.data() : { currentMonth: "", status: "IDLE", updatedAt: 0 };
         
-        if (data.currentMonth === reportingMonthStr && data.status === "SENT") return; 
+        if (data.currentMonth === reportingMonthStr && (data.status === "SENT" || data.status === "COMPLIANCE_HALT")) return; 
 
         const lastUpdated = data.updatedAt ? new Date(data.updatedAt) : new Date(0);
         const minutesSinceUpdate = (istNow - lastUpdated) / (1000 * 60);
@@ -1108,7 +1113,7 @@ async function runAutomatedGSTCheck(isBootUp = false) {
                     await sendFreeTextMessage(adminPhone, fallback).catch(()=>{});
                 }
                 
-                await docRef.set({ currentMonth: reportingMonthStr, status: "FAILED", updatedAt: new Date().toISOString() });
+                await docRef.set({ currentMonth: reportingMonthStr, status: "COMPLIANCE_HALT", updatedAt: new Date().toISOString() });
                 return;
             } else {
                 throw new Error(`Server returned status: ${response.status}`);
@@ -1314,6 +1319,7 @@ app.post('/webhook', async (req, res) => {
                     if (messageText.toLowerCase() === 'chitfunds all' || messageText.toLowerCase() === 'auto chitfunds all') {
                         console.log(`[TRIGGER] Received GLOBAL Chitfunds command from ${senderPhone}`);
                         globalCancelFlag = false;
+                        isAutoDispatchPaused = false;
                         await handleGlobalChitfundsDispatch(senderPhone);
                         return;
                     }
@@ -1326,6 +1332,7 @@ app.post('/webhook', async (req, res) => {
                     const targetGroupId = match[1].trim();
                     console.log(`[TRIGGER] Received Chitfunds command for group: "${targetGroupId}" from ${senderPhone}`);
                     globalCancelFlag = false;
+                    isAutoDispatchPaused = false;
                     await handleChitfundsDispatch(targetGroupId, senderPhone);
                 }
             }
@@ -1446,7 +1453,7 @@ app.get('/', (req, res) => {
     <div class="info-card">
       <div>Webhook Status: <span id="webhook-status">Active (/webhook)</span></div>
       <div>Phone Number ID: <span id="phone-id">${META_PHONE_NUMBER_ID || 'Not Configured'}</span></div>
-      <div>Pacing Strategy: <span>5-10s Member / 1m Group</span></div>
+      <div>Pacing Strategy: <span>4-6s Member / 1m Group</span></div>
     </div>
 
     <div style="text-align: left; margin-top: 16px;">
