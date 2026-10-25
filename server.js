@@ -1222,24 +1222,35 @@ app.post('/webhook', async (req, res) => {
                     const senderPhone = formatIndianPhoneNumber(msg.from);
                     const isAuthorized = currentAdminPhone ? (senderPhone === currentAdminPhone) : true;
 
-                    // 1. Handle the "Contact" Button Click (Anyone can click this)
-                    if (msg.type === 'interactive' && msg.interactive?.button_reply?.id === 'get_admin_contact') {
-                        console.log(`[INBOUND] Contact button clicked by ${senderPhone}`);
-                        const adminNum = cachedAdminPhone || "Not Configured";
-                        const replyText = `📞 *Contact Number:*\n+${adminNum}\n\nIndha number-ku call panni pesunga.`;
-                        await sendFreeTextMessage(senderPhone, replyText);
-                        continue;
+                    // 1. Handle Interactive Button Clicks (Anyone can click these)
+                    if (msg.type === 'interactive') {
+                        const buttonId = msg.interactive?.button_reply?.id;
+                        
+                        if (buttonId === 'get_admin_contact') {
+                            console.log(`[INBOUND] Contact button clicked by ${senderPhone}`);
+                            const adminNum = cachedAdminPhone || "Not Configured";
+                            const replyText = `📞 *Admin Contact Number:*\n+${adminNum}\n\nIndha number-ku call panni pesunga.`;
+                            await sendFreeTextMessage(senderPhone, replyText);
+                            continue;
+                        }
+                        
+                        if (buttonId === 'view_ledger_btn') {
+                            console.log(`[INBOUND] View Ledger button clicked by ${senderPhone}`);
+                            const ledgerText = `📊 *View Your Ledger:*\nUnga *Account ID* enter panni check pannikonga. ✅\n\n🔗 https://tinyurl.com/meenachitfunds`;
+                            await sendFreeTextMessage(senderPhone, ledgerText);
+                            continue;
+                        }
                     }
 
                     // 2. CATCH-ALL FOR UNAUTHORIZED USERS (Text, Image, Audio, Document)
                     if (!isAuthorized) {
                         console.warn(`[ACCESS DENIED] Unauthorized message/media from: ${senderPhone}`);
                         
-                        let warningText = "Idhu automated system, inga chat panna mudiyathu. 🚫\n\nContact pannathuku keela irukka button-a press pannunga. 👇";
+                        let warningText = "Idhu oru automated system, inga direct-a chat panna mudiyathu. 🚫\n\nUnga account details/ledger paaka 'View Ledger' button-a click pannunga.\nAdmin-a contact panna 'Contact' button-a click pannunga. 👇";
                         
                         // Switch phrasing if they send any form of media
                         if (msg.type !== 'text') {
-                            warningText = "Idhu automated system, inga photos/images anuppa mudiyathu. 🚫\n\nNeenga images anuppa, keela irukka button-a press panni admin contact number eduthukonga. 👇";
+                            warningText = "Idhu automated system, inga photos, videos, or voice messages anuppa mudiyathu. 🚫\n\nUnga account details/ledger paaka 'View Ledger' button-a click pannunga.\nAdmin-a contact panna 'Contact' button-a click pannunga. 👇";
                         }
 
                         const interactivePayload = {
@@ -1252,6 +1263,10 @@ app.post('/webhook', async (req, res) => {
                                 body: { text: warningText },
                                 action: {
                                     buttons: [
+                                        {
+                                            type: 'reply',
+                                            reply: { id: 'view_ledger_btn', title: 'View Ledger' }
+                                        },
                                         {
                                             type: 'reply',
                                             reply: { id: 'get_admin_contact', title: 'Contact' }
