@@ -406,6 +406,7 @@ async function sendParticipantReminderTemplate(toPhone, { groupName, timeline, p
             type: 'body',
             parameters: [
                 { type: 'text', text: String(groupName) },
+                { type: 'text', text: String(userId) },
                 { type: 'text', text: String(timeline) },
                 { type: 'text', text: String(participantName) },
                 { type: 'text', text: String(breakdown) },
@@ -429,6 +430,7 @@ async function sendParticipantReminderTemplate(toPhone, { groupName, timeline, p
         const fallbackText = 
 `*Meena Chitfunds*
 Group: ${groupName}
+Account ID: ${userId}
 Timeline: Month ${timeline}
 
 Dear ${participantName},
