@@ -1231,14 +1231,14 @@ app.post('/webhook', async (req, res) => {
                         if (buttonId === 'get_admin_contact') {
                             console.log(`[INBOUND] Contact button clicked by ${senderPhone}`);
                             const adminNum = cachedAdminPhone || "Not Configured";
-                            const replyText = `📞 *Admin Contact Number:*\n+${adminNum}\n\nIndha number-ku call panni pesunga.`;
+                            const replyText = `📞 *நிர்வாகியின் எண்:*\n+${adminNum}\n\nஏதேனும் சந்தேகம் இருந்தால், இந்த எண்ணிற்கு நேரடியாக அழைக்கவும்.`;
                             await sendFreeTextMessage(senderPhone, replyText);
                             continue;
                         }
                         
                         if (buttonId === 'view_ledger_btn') {
                             console.log(`[INBOUND] View Ledger button clicked by ${senderPhone}`);
-                            const ledgerText = `📊 *View Your Ledger:*\nUnga *Account ID* enter panni check pannikonga. ✅\n\n🔗 https://tinyurl.com/meenachitfunds`;
+                            const ledgerText = `📊 *உங்கள் கணக்கு விவரம்:*\nகீழே உள்ள லிங்கை கிளிக் செய்து, உங்கள் Account ID உள்ளிட்டு சரிபார்க்கவும். ✅\n\n🔗 https://tinyurl.com/meenachitfunds`;
                             await sendFreeTextMessage(senderPhone, ledgerText);
                             continue;
                         }
@@ -1248,11 +1248,11 @@ app.post('/webhook', async (req, res) => {
                     if (!isAuthorized) {
                         console.warn(`[ACCESS DENIED] Unauthorized message/media from: ${senderPhone}`);
                         
-                        let warningText = "Idhu oru automated system, inga direct-a chat panna mudiyathu. 🚫\n\nUnga account details/ledger paaka 'View Ledger' button-a click pannunga.\nAdmin-a contact panna 'Contact' button-a click pannunga. 👇";
+                        let warningText = "இது ஒரு தானியங்கி சேவை, இங்கு உங்களால் நேரடியாக மெசேஜ் செய்ய முடியாது. 🚫\n\nஉங்கள் கணக்கு விவரங்களை அறிய கீழே உள்ள 'View Ledger' பட்டனை அழுத்தவும்.\nநிர்வாகியை தொடர்பு கொள்ள 'Contact' பட்டனை அழுத்தவும். 👇";
                         
                         // Switch phrasing if they send any form of media
                         if (msg.type !== 'text') {
-                            warningText = "Idhu automated system, inga photos, videos, or voice messages anuppa mudiyathu. 🚫\n\nUnga account details/ledger paaka 'View Ledger' button-a click pannunga.\nAdmin-a contact panna 'Contact' button-a click pannunga. 👇";
+                            warningText = "இது ஒரு தானியங்கி சேவை, இங்கு புகைப்படங்கள், வீடியோக்கள் அல்லது வாய்ஸ் மெசேஜ்களை அனுப்ப முடியாது. 🚫\n\nஉங்கள் கணக்கு விவரங்களை அறிய கீழே உள்ள 'View Ledger' பட்டனை அழுத்தவும்.\nநிர்வாகியை தொடர்பு கொள்ள 'Contact' பட்டனை அழுத்தவும். 👇";
                         }
 
                         const interactivePayload = {
