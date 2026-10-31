@@ -19,11 +19,13 @@
  * 14. Verification Handshake (GET /webhook) & Event Listener (POST /webhook).
  * 15. Zero-Read Hourly Engine: In-Memory Cycle Caching completely eliminates redundant reads.
  * 16. Integrated GST Reporter Engine with Native Cloud PDF Uploader.
+ * 17. HMAC SHA-256 Webhook Security ensuring zero payload spoofing.
  */
 
 const express = require('express');
 const http = require('http');
 const https = require('https');
+const crypto = require('crypto');
 const { initializeApp, cert, getApps } = require('firebase-admin/app');
 const { getFirestore, FieldValue, FieldPath } = require('firebase-admin/firestore');
 const path = require('path');
@@ -58,11 +60,14 @@ if (fs.existsSync(localEnvPath)) {
 
 const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN || process.env.WHATSAPP_TOKEN;
 const META_PHONE_NUMBER_ID = process.env.META_PHONE_NUMBER_ID || process.env.WHATSAPP_PHONE_NUMBER_ID;
-const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN || 'MEENA_CHITFUNDS_SECURE_VERIFY_2026';
+
+// STRICTLY require environment variables for security (No hardcoded fallbacks)
+const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN;
+const META_APP_SECRET = process.env.META_APP_SECRET;
 const META_API_VERSION = process.env.META_API_VERSION || 'v20.0';
 
-if (!META_ACCESS_TOKEN || !META_PHONE_NUMBER_ID) {
-    console.warn('[WARNING] META_ACCESS_TOKEN or META_PHONE_NUMBER_ID is missing from secrets. Cloud API outbound requests will fail until set.');
+if (!META_ACCESS_TOKEN || !META_PHONE_NUMBER_ID || !WEBHOOK_VERIFY_TOKEN || !META_APP_SECRET) {
+    console.warn('[WARNING] Meta Credentials, Verify Token, or App Secret are missing from secrets. Webhooks and Cloud API will fail until set.');
 }
 
 // --- 2. FIREBASE ADMIN INITIALIZATION (ENV OR LOCAL JSON) ---
@@ -101,7 +106,14 @@ console.log('[FIREBASE] Firestore Admin SDK initialized.');
 
 // --- 3. GLOBAL STATE & DISPATCH TIMERS ---
 const app = express();
-app.use(express.json()); // Essential for parsing incoming Meta Webhooks
+
+// Secure raw body capture for HMAC Webhook Signature Verification
+app.use(express.json({
+    verify: (req, res, buf) => {
+        req.rawBody = buf;
+    }
+}));
+
 const server = http.createServer(app);
 const PORT = process.env.PORT || 5555;
 
@@ -465,7 +477,7 @@ async function sendAdminCycleStart(adminPhone, cycleName, timestamp, queuedCount
     }
 }
 
-async function sendAdminGroupReport(adminPhone, { groupId, groupName, deliveredCount, failureCount, totalReminded }) {
+async function sendAdminGroupReport(adminPhone, { groupId, groupName, deliveredCount, failureCount, totalReminded, failedDetails }) {
     const components = [
         {
             type: 'body',
@@ -474,7 +486,8 @@ async function sendAdminGroupReport(adminPhone, { groupId, groupName, deliveredC
                 { type: 'text', text: String(groupName) },
                 { type: 'text', text: String(deliveredCount) },
                 { type: 'text', text: String(failureCount) },
-                { type: 'text', text: String(totalReminded) }
+                { type: 'text', text: String(totalReminded) },
+                { type: 'text', text: String(failedDetails || 'None') }
             ]
         }
     ];
@@ -487,6 +500,7 @@ Group Name: ${groupName.toUpperCase()}
 - Reminders Delivered: ${deliveredCount}
 - Delivery Failures: ${failureCount}
 - Pending Value Reminded: ₹${totalReminded}
+- Failed Participants: ${failedDetails || 'None'}
 
 Group struck from active queue.`;
         return await sendFreeTextMessage(adminPhone, report).catch(() => {});
@@ -843,6 +857,7 @@ async function processOneGroup(queueType, STATE_REF) {
 
         let successCount = 0;
         let failCount = 0;
+        let failedParticipants = []; // Stores failing participant details purely in RAM
 
         for (let i = 0; i < filteredDispatchQueue.length; i++) {
             if (globalCancelFlag || isAutoDispatchPaused || isQuietHours()) {
@@ -866,6 +881,7 @@ async function processOneGroup(queueType, STATE_REF) {
             } catch (sendErr) {
                 console.error(`[DISPATCH ERROR] Failed sending to ${item.phone}:`, sendErr.message);
                 failCount++;
+                failedParticipants.push(`${item.name} (${item.id})`); // Retain failing record in memory
             } finally {
                 await STATE_REF.update({ pendingUsers: FieldValue.arrayRemove(item.id) }).catch(() => {});
             }
@@ -894,7 +910,8 @@ async function processOneGroup(queueType, STATE_REF) {
                     groupName: groupData.groupName || groupId,
                     deliveredCount: successCount,
                     failureCount: failCount,
-                    totalReminded: groupPendingTotal.toLocaleString('en-IN')
+                    totalReminded: groupPendingTotal.toLocaleString('en-IN'),
+                    failedDetails: failedParticipants.length > 0 ? failedParticipants.join(', ') : 'None'
                 });
             }
         }
@@ -1201,6 +1218,28 @@ app.get('/webhook', (req, res) => {
 });
 
 app.post('/webhook', async (req, res) => {
+    // 1. Extract the Meta signature
+    const signature = req.headers['x-hub-signature-256'];
+    
+    // 2. Reject if signature, raw body, or secret is missing
+    if (!signature || !META_APP_SECRET || !req.rawBody) {
+        console.warn('[WEBHOOK] Unauthorized: Missing signature, raw body, or App Secret.');
+        return res.sendStatus(401);
+    }
+
+    // 3. Compute the expected HMAC SHA-256 signature
+    const expectedSignature = 'sha256=' + crypto.createHmac('sha256', META_APP_SECRET).update(req.rawBody).digest('hex');
+    
+    // 4. Securely compare signatures to prevent timing attacks
+    const sigBuffer = Buffer.from(signature);
+    const expectedBuffer = Buffer.from(expectedSignature);
+    
+    if (sigBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(sigBuffer, expectedBuffer)) {
+        console.warn('[WEBHOOK] Unauthorized: Signature mismatch. Payload altered or spoofed.');
+        return res.sendStatus(401);
+    }
+
+    // 5. Signature fully verified, acknowledge receipt to Meta
     res.sendStatus(200);
 
     const body = req.body;
