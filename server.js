@@ -1406,13 +1406,34 @@ app.post('/webhook', async (req, res) => {
                     const triggerRegex = /^chitfunds\s+@?([A-Za-z0-9_-]+)/i;
                     const match = messageText.match(triggerRegex);
 
-                    if (!match) continue;
+                    if (match) {
+                        const targetGroupId = match[1].trim().toUpperCase();
+                        console.log(`[TRIGGER] Received Chitfunds command for group: "${targetGroupId}" from ${senderPhone}`);
+                        globalCancelFlag = false;
+                        isAutoDispatchPaused = false;
+                        await handleChitfundsDispatch(targetGroupId, senderPhone);
+                        continue; 
+                    }
 
-                    const targetGroupId = match[1].trim().toUpperCase();
-                    console.log(`[TRIGGER] Received Chitfunds command for group: "${targetGroupId}" from ${senderPhone}`);
-                    globalCancelFlag = false;
-                    isAutoDispatchPaused = false;
-                    await handleChitfundsDispatch(targetGroupId, senderPhone);
+                    // ⚠️ FALLBACK: Unrecognized Command -> Professional Admin Help Menu
+                    const helpText = `⚠️ *Unrecognized System Command*\n` +
+                        `The server could not process your input. Please utilize one of the authorized commands from the directory below:\n\n` +
+                        `*🚀 DISPATCH MANAGEMENT*\n` +
+                        `• *chitfunds <groupId>* : Queue a specific group for dispatch.\n` +
+                        `• *chitfunds all* : Queue all active groups globally.\n\n` +
+                        `*⚙️ ENGINE CONTROLS*\n` +
+                        `• *chitfunds pause* : Suspend the master dispatch engine.\n` +
+                        `• *chitfunds resume* : Resume operations (respects Quiet Hours).\n` +
+                        `• *chitfunds stop* : Emergency halt and clear all active queues.\n\n` +
+                        `*📊 GST & COMPLIANCE*\n` +
+                        `• *gst report* : Generate the standard monthly GST PDF.\n` +
+                        `• *force gst report* : Force report generation bypassing safety checks.\n\n` +
+                        `*🔧 SYSTEM ADMINISTRATION*\n` +
+                        `• *change admin number <phone>* : Update the authorized admin phone number.\n` +
+                        `• *gst sys ping* : View live RAM, CPU, and Uptime diagnostics.\n\n` +
+                        `_Note: Commands are not case-sensitive._`;
+
+                    await sendFreeTextMessage(senderPhone, helpText);
                 }
             }
         }
