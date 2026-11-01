@@ -128,6 +128,10 @@ let cachedAdminPhone = null; // ZERO-READ RAM CACHE FOR ADMIN PHONE
 // ZERO-READ IN-MEMORY CYCLE CACHE
 let cachedWindowKey = null;
 
+// --- ENTERPRISE RAM TRACKER (CORRELATION ID MAP) ---
+// Used to capture asynchronous delivery failures from Meta webhooks without database reads
+const activeDispatchTracker = new Map(); 
+
 // GST GLOBAL STATE
 const HF_API_URL = "https://corporationgoorac-quanai.hf.space/api/generate-bot";
 let isManualGenerating = false;
@@ -862,12 +866,17 @@ async function processOneGroup(queueType, STATE_REF) {
         for (let i = 0; i < filteredDispatchQueue.length; i++) {
             if (globalCancelFlag || isAutoDispatchPaused || isQuietHours()) {
                 if (isQuietHours()) cachedWindowKey = null;
+                
+                // Explicit Garbage Collection on early exit to prevent RAM leaks
+                for (const [msgId, record] of activeDispatchTracker.entries()) {
+                    if (record.groupId === groupId) activeDispatchTracker.delete(msgId);
+                }
                 return; 
             }
 
             const item = filteredDispatchQueue[i];
             try {
-                await sendParticipantReminderTemplate(item.phone, {
+                const dispatchRes = await sendParticipantReminderTemplate(item.phone, {
                     groupName: item.groupName,
                     timeline: item.timeline,
                     participantName: item.name,
@@ -875,6 +884,19 @@ async function processOneGroup(queueType, STATE_REF) {
                     totalAmount: item.amount,
                     userId: item.id
                 });
+                
+                // --- ENTERPRISE RAM TRACKER REGISTRY INJECTION ---
+                if (dispatchRes && dispatchRes.messages && dispatchRes.messages[0]) {
+                    activeDispatchTracker.set(dispatchRes.messages[0].id, {
+                        groupId: groupId,
+                        name: item.name,
+                        id: item.id,
+                        failed: false,
+                        timestamp: Date.now()
+                    });
+                }
+                // -------------------------------------------------
+
                 successCount++;
                 groupPendingTotal += (item.rawAmount || 0);
                 console.log(`[${queueType}] Template sent to ${item.name} (${item.phone})`);
@@ -889,7 +911,12 @@ async function processOneGroup(queueType, STATE_REF) {
             if (i < filteredDispatchQueue.length - 1) {
                 console.log(`[${queueType}] Pacing dispatch: waiting 4-6 seconds before next recipient...`);
                 let interrupted = await interruptibleWaitSeconds(4, 6, 'RECIPIENT PACING');
-                if (interrupted) return;
+                if (interrupted) {
+                    for (const [msgId, record] of activeDispatchTracker.entries()) {
+                        if (record.groupId === groupId) activeDispatchTracker.delete(msgId);
+                    }
+                    return;
+                }
             }
         }
 
@@ -898,6 +925,23 @@ async function processOneGroup(queueType, STATE_REF) {
         let remainingActionable = postPending.filter(id => dispatchQueue.some(item => item.id === id));
 
         if (!globalCancelFlag && !isAutoDispatchPaused && remainingActionable.length === 0) {
+            
+            // --- ENTERPRISE SETTLEMENT PAUSE & RAM MATH CORRECTION ---
+            console.log(`[${queueType}] Group dispatch loop finished. Initiating 8-second settlement pause for asynchronous delivery webhooks...`);
+            await interruptibleWaitSeconds(8, 8, 'SETTLEMENT PAUSE');
+
+            for (const [msgId, record] of activeDispatchTracker.entries()) {
+                if (record.groupId === groupId) {
+                    if (record.failed) {
+                        successCount--; // Subtract from success tally
+                        failCount++;    // Add to failure tally
+                        failedParticipants.push(`${record.name} (${record.id})`);
+                    }
+                    activeDispatchTracker.delete(msgId); // Immediate Garbage Collection
+                }
+            }
+            // ---------------------------------------------------------
+
             await STATE_REF.update({ 
                 pendingGroups: FieldValue.arrayRemove(groupId),
                 currentProcessingGroup: FieldValue.delete(),
@@ -1253,6 +1297,23 @@ app.post('/webhook', async (req, res) => {
             const changes = entry.changes || [];
             for (const change of changes) {
                 const value = change.value;
+                
+                // --- 1. ENTERPRISE DELIVERY STATUS LISTENER (RAM TRACKER) ---
+                if (value && value.statuses) {
+                    for (const status of value.statuses) {
+                        if (status.status === 'failed') {
+                            const msgId = status.id;
+                            if (activeDispatchTracker.has(msgId)) {
+                                const record = activeDispatchTracker.get(msgId);
+                                record.failed = true;
+                                console.log(`[WEBHOOK-TRACKER] Caught asynchronous failure for ${record.name} (${record.id}) via Meta Correlation ID.`);
+                            }
+                        }
+                    }
+                }
+                // -------------------------------------------------------------
+
+                // 2. EXISTING MESSAGE LISTENER
                 if (!value || !value.messages) continue;
 
                 for (const msg of value.messages) {
@@ -1618,4 +1679,14 @@ server.listen(PORT, () => {
     // Initialize GST Checkers
     setInterval(() => runAutomatedGSTCheck(false), 600000); 
     setTimeout(() => runAutomatedGSTCheck(true), 45000); 
+
+    // ENTERPRISE MEMORY LEAK FAILSAFE (Clears orphaned RAM Tracker IDs older than 15 mins)
+    setInterval(() => {
+        const now = Date.now();
+        for (const [msgId, record] of activeDispatchTracker.entries()) {
+            if (now - record.timestamp > 15 * 60 * 1000) {
+                activeDispatchTracker.delete(msgId);
+            }
+        }
+    }, 5 * 60 * 1000);
 });
