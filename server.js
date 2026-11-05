@@ -37,6 +37,7 @@ const { performance } = require('perf_hooks');
 // Single source of truth for all Meta WhatsApp templates and their specific language codes
 const TEMPLATE_REGISTRY = {
     PAYMENT_REMINDER: { name: 'chit_payment_due_reminder', language: 'en_GB' },
+    PAYMENT_DUE_CURRENT: { name: 'chit_payment_due_current', language: 'en_GB' }, // NEW: Soft template for current month only
     ADMIN_CYCLE_START: { name: 'admin_dispatch_started', language: 'en' },
     ADMIN_GROUP_REPORT: { name: 'admin_group_summary_report', language: 'en' },
     GST_MONTHLY_REPORT: { name: 'gst_monthly_report', language: 'en' },
@@ -415,7 +416,7 @@ async function sendTemplateMessage(toPhone, templateKey, components = []) {
     return await callMetaWhatsAppAPI(payload);
 }
 
-async function sendParticipantReminderTemplate(toPhone, { groupName, timeline, participantName, breakdown, totalAmount, userId }) {
+async function sendParticipantReminderTemplate(toPhone, { groupName, timeline, participantName, breakdown, totalAmount, userId, isCurrentMonthOnly }) {
     const components = [
         {
             type: 'body',
@@ -438,10 +439,19 @@ async function sendParticipantReminderTemplate(toPhone, { groupName, timeline, p
         }
     ];
 
+    // --- DYNAMIC TEMPLATE ROUTING ---
+    const templateKey = isCurrentMonthOnly ? 'PAYMENT_DUE_CURRENT' : 'PAYMENT_REMINDER';
+
     try {
-        return await sendTemplateMessage(toPhone, 'PAYMENT_REMINDER', components);
+        return await sendTemplateMessage(toPhone, templateKey, components);
     } catch (err) {
-        console.warn(`[FALLBACK NOTICE] Template 'PAYMENT_REMINDER' failed or pending approval (${err.message}). Attempting free-text dispatch fallback.`);
+        console.warn(`[FALLBACK NOTICE] Template '${templateKey}' failed or pending approval (${err.message}). Attempting free-text dispatch fallback.`);
+        
+        // Context-aware fallback intro based on the status
+        const introText = isCurrentMonthOnly 
+            ? "Your installment for the current month is due:" 
+            : "You have pending payments for the following months:";
+
         const fallbackText = 
 `*Meena Chitfunds*
 Group: ${groupName}
@@ -449,7 +459,7 @@ Account ID: ${userId}
 Timeline: Month ${timeline}
 
 Dear ${participantName},
-You have pending payments for the following months:
+${introText}
 
 ${breakdown}
 *Total Pending: ₹${totalAmount}*
@@ -833,6 +843,10 @@ async function processOneGroup(queueType, STATE_REF) {
 
                 const participantName = (user.name || 'Participant').toUpperCase();
                 const groupName = (groupData.groupName || groupId).toUpperCase();
+                
+                // --- ENTERPRISE ROUTING INJECTION ---
+                // If they strictly owe for exactly 1 month, it implies only the current month is due.
+                const isCurrentMonthOnly = pendingMonthsList.length === 1;
 
                 dispatchQueue.push({ 
                     id: user.id, 
@@ -842,7 +856,8 @@ async function processOneGroup(queueType, STATE_REF) {
                     timeline: `${expectedUserMonth} of ${groupData.totalMonths || 0}`,
                     breakdown: breakdownText.trim(),
                     amount: totalOwed.toLocaleString('en-IN'),
-                    rawAmount: totalOwed
+                    rawAmount: totalOwed,
+                    isCurrentMonthOnly: isCurrentMonthOnly
                 });
             }
         }
@@ -882,7 +897,8 @@ async function processOneGroup(queueType, STATE_REF) {
                     participantName: item.name,
                     breakdown: item.breakdown,
                     totalAmount: item.amount,
-                    userId: item.id
+                    userId: item.id,
+                    isCurrentMonthOnly: item.isCurrentMonthOnly // PASS ROUTING FLAG TO DISPATCHER
                 });
                 
                 // --- ENTERPRISE RAM TRACKER REGISTRY INJECTION ---
