@@ -924,7 +924,7 @@ async function processOneGroup(queueType, STATE_REF) {
             } catch (sendErr) {
                 console.error(`[DISPATCH ERROR] Failed sending to ${item.phone}:`, sendErr.message);
                 failCount++;
-                failedParticipants.push(`${item.name} (${item.id})`); // Retain failing record in memory
+                failedParticipants.push(`${item.name} (${item.id}) - API Error`); // Retain failing record with API Error reason
             } finally {
                 await STATE_REF.update({ pendingUsers: FieldValue.arrayRemove(item.id) }).catch(() => {});
             }
@@ -956,7 +956,7 @@ async function processOneGroup(queueType, STATE_REF) {
                     if (record.failed) {
                         successCount--; // Subtract from success tally
                         failCount++;    // Add to failure tally
-                        failedParticipants.push(`${record.name} (${record.id})`);
+                        failedParticipants.push(`${record.name} (${record.id}) - ${record.failReason || 'Delivery Failed'}`);
                     }
                     activeDispatchTracker.delete(msgId); // Immediate Garbage Collection
                 }
@@ -1327,7 +1327,17 @@ app.post('/webhook', async (req, res) => {
                             if (activeDispatchTracker.has(msgId)) {
                                 const record = activeDispatchTracker.get(msgId);
                                 record.failed = true;
-                                console.log(`[WEBHOOK-TRACKER] Caught asynchronous failure for ${record.name} (${record.id}) via Meta Correlation ID.`);
+                                
+                                // NEW: Capture the exact reason Meta failed it
+                                let reason = "Delivery Failed";
+                                if (status.errors && status.errors.length > 0) {
+                                    const code = status.errors[0].code;
+                                    if (code === 131026) reason = "Blocked / Not on WA";
+                                    else reason = `Error ${code}`;
+                                }
+                                record.failReason = reason;
+
+                                console.log(`[WEBHOOK-TRACKER] Caught asynchronous failure for ${record.name} (${record.id}) - ${reason}`);
                             }
                         }
                     }
