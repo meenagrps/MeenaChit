@@ -792,6 +792,7 @@ async function processOneGroup(queueType, STATE_REF) {
         memberSnapshot.forEach(m => snapshotMap.set(m.id, m));
 
         const dispatchQueue = [];
+        const validationFailures = []; // NEW: Isolate bad data here
         let groupPendingTotal = 0;
 
         for (const user of userRecords) {
@@ -826,7 +827,11 @@ async function processOneGroup(queueType, STATE_REF) {
                 }
 
                 const targetPhone = formatIndianPhoneNumber(user.phone);
-                if (!targetPhone) continue;
+                if (!targetPhone) {
+                    // Log the bad data, then skip adding to dispatchQueue
+                    validationFailures.push(`${(user.name || 'Participant').toUpperCase()} (${user.id}) - Invalid Phone`);
+                    continue;
+                }
 
                 let breakdownArray = [];
                 
@@ -875,8 +880,8 @@ async function processOneGroup(queueType, STATE_REF) {
         let filteredDispatchQueue = dispatchQueue.filter(item => pendingUsers.includes(item.id));
 
         let successCount = 0;
-        let failCount = 0;
-        let failedParticipants = []; // Stores failing participant details purely in RAM
+        let failCount = validationFailures.length; // Pre-load data errors
+        let failedParticipants = [...validationFailures]; // Spread in the invalid phones purely in RAM
 
         for (let i = 0; i < filteredDispatchQueue.length; i++) {
             if (globalCancelFlag || isAutoDispatchPaused || isQuietHours()) {
