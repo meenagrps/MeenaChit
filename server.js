@@ -20,7 +20,7 @@
  * 15. Zero-Read Hourly Engine: In-Memory Cycle Caching completely eliminates redundant reads.
  * 16. Integrated GST Reporter Engine with Native Cloud PDF Uploader.
  * 17. HMAC SHA-256 Webhook Security ensuring zero payload spoofing.
- * 18. On-Demand Participant Lookup with 10-Min Auto-Expiring Session Cache & Dynamic Ledger Dispatch.
+ * 18. On-Demand Participant Lookup with 4-Min Auto-Expiring Session Cache & Dynamic Ledger Dispatch.
  */
 
 const express = require('express');
@@ -134,10 +134,10 @@ let cachedWindowKey = null;
 // Used to capture asynchronous delivery failures from Meta webhooks without database reads
 const activeDispatchTracker = new Map(); 
 
-// --- SHORT-LIVED PARTICIPANT SESSION CACHE (10-MINUTE TTL) ---
+// --- SHORT-LIVED PARTICIPANT SESSION CACHE (4-MINUTE TTL) ---
 // Holds matched participant accounts temporarily after an inbound message so clicking "View Ledger" costs 0 extra Firestore reads
 const participantSessionCache = new Map();
-const PARTICIPANT_CACHE_TTL_MS = 10 * 60 * 1000;
+const PARTICIPANT_CACHE_TTL_MS = 4 * 60 * 1000;
 
 // GST GLOBAL STATE
 const HF_API_URL = "https://corporationgoorac-quanai.hf.space/api/generate-bot";
@@ -268,7 +268,7 @@ function extractTenDigitPhone(rawPhone) {
     return normalized.slice(-10);
 }
 
-// On-Demand Participant Account Lookup (Uses 10-min temporary memory cache to prevent duplicate reads on button click)
+// On-Demand Participant Account Lookup (Uses 4-min temporary memory cache to prevent duplicate reads on button click)
 async function lookupParticipantAccounts(senderPhone) {
     const tenDigitPhone = extractTenDigitPhone(senderPhone);
     if (!tenDigitPhone) return [];
@@ -283,10 +283,18 @@ async function lookupParticipantAccounts(senderPhone) {
         const accounts = [];
         snap.forEach(docSnap => {
             const data = docSnap.data() || {};
+            let resolvedGroupId = 'N/A';
+
+            if (Array.isArray(data.activeGroups) && data.activeGroups.length > 0) {
+                resolvedGroupId = data.activeGroups.map(g => String(g).trim().toUpperCase()).join(', ');
+            } else if (data.groupId) {
+                resolvedGroupId = String(data.groupId).trim().toUpperCase();
+            }
+
             accounts.push({
                 id: docSnap.id,
                 name: (data.name || 'PARTICIPANT').toUpperCase(),
-                groupId: (data.groupId || 'N/A').toUpperCase()
+                groupId: resolvedGroupId
             });
         });
 
@@ -1452,8 +1460,13 @@ https://corporationgoorac.github.io/ChitFunds/#${acc.id}`;
                         let replyBodyText;
 
                         if (participantAccounts.length > 0) {
-                            console.log(`[INBOUND PARTICIPANT] Recognized customer (${senderPhone}) with ${participantAccounts.length} account(s). Sending Tamil greeting.`);
-                            replyBodyText = "வணக்கம்! 🙏\n*Meena Chitfunds*-க்கு வரவேற்கிறோம்.\n\nஉங்கள் கணக்கு விவரங்களைப் பார்க்க கீழே உள்ள *'View Ledger'* பட்டனை அழுத்தவும்.\nநிர்வாகியைத் தொடர்பு கொள்ள *'Contact'* பட்டனை அழுத்தவும். 👇";
+                            if (msg.type !== 'text') {
+                                console.log(`[INBOUND PARTICIPANT MEDIA] Recognized customer (${senderPhone}) sent ${msg.type}. Sending polite media notice.`);
+                                replyBodyText = "வணக்கம்! 🙏\nஇங்கு உங்கள் கணக்கு விவரங்களை மட்டுமே சரிபார்க்க முடியும். புகைப்படங்கள், வீடியோக்கள் அல்லது வாய்ஸ் மெசேஜ்களை அனுப்ப முடியாது.\n\nஉங்கள் கணக்கு விவரங்களைப் பார்க்க கீழே உள்ள *'View Ledger'* பட்டனை அழுத்தவும்.\nநிர்வாகியைத் தொடர்பு கொள்ள *'Contact'* பட்டனை அழுத்தவும். 👇";
+                            } else {
+                                console.log(`[INBOUND PARTICIPANT] Recognized customer (${senderPhone}) with ${participantAccounts.length} account(s). Sending Tamil greeting.`);
+                                replyBodyText = "வணக்கம்! 🙏\n*Meena Chitfunds*-க்கு வரவேற்கிறோம்.\n\nஉங்கள் கணக்கு விவரங்களைப் பார்க்க கீழே உள்ள *'View Ledger'* பட்டனை அழுத்தவும்.\nநிர்வாகியைத் தொடர்பு கொள்ள *'Contact'* பட்டனை அழுத்தவும். 👇";
+                            }
                         } else {
                             console.warn(`[ACCESS DENIED] Unauthorized message/media from: ${senderPhone}`);
                             
@@ -1792,7 +1805,7 @@ server.listen(PORT, () => {
     setInterval(() => runAutomatedGSTCheck(false), 600000); 
     setTimeout(() => runAutomatedGSTCheck(true), 45000); 
 
-    // ENTERPRISE MEMORY LEAK FAILSAFE (Clears orphaned RAM Tracker IDs older than 15 mins & Participant Session Cache older than 10 mins)
+    // ENTERPRISE MEMORY LEAK FAILSAFE (Clears orphaned RAM Tracker IDs older than 15 mins & Participant Session Cache older than 4 mins)
     setInterval(() => {
         const now = Date.now();
         for (const [msgId, record] of activeDispatchTracker.entries()) {
@@ -1805,5 +1818,5 @@ server.listen(PORT, () => {
                 participantSessionCache.delete(phoneKey);
             }
         }
-    }, 5 * 60 * 1000);
+    }, 2 * 60 * 1000);
 });
