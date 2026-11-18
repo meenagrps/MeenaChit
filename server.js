@@ -20,6 +20,7 @@
  * 15. Zero-Read Hourly Engine: In-Memory Cycle Caching completely eliminates redundant reads.
  * 16. Integrated GST Reporter Engine with Native Cloud PDF Uploader.
  * 17. HMAC SHA-256 Webhook Security ensuring zero payload spoofing.
+ * 18. On-Demand Participant Lookup with 10-Min Auto-Expiring Session Cache & Dynamic Ledger Dispatch.
  */
 
 const express = require('express');
@@ -132,6 +133,11 @@ let cachedWindowKey = null;
 // --- ENTERPRISE RAM TRACKER (CORRELATION ID MAP) ---
 // Used to capture asynchronous delivery failures from Meta webhooks without database reads
 const activeDispatchTracker = new Map(); 
+
+// --- SHORT-LIVED PARTICIPANT SESSION CACHE (10-MINUTE TTL) ---
+// Holds matched participant accounts temporarily after an inbound message so clicking "View Ledger" costs 0 extra Firestore reads
+const participantSessionCache = new Map();
+const PARTICIPANT_CACHE_TTL_MS = 10 * 60 * 1000;
 
 // GST GLOBAL STATE
 const HF_API_URL = "https://corporationgoorac-quanai.hf.space/api/generate-bot";
@@ -253,6 +259,47 @@ function formatIndianPhoneNumber(rawPhone) {
     }
 
     return digits;
+}
+
+// Extracts exact 10-digit Indian phone number (e.g., "919876543210" -> "9876543210") for zero-index Firestore lookup
+function extractTenDigitPhone(rawPhone) {
+    const normalized = formatIndianPhoneNumber(rawPhone);
+    if (!normalized || normalized.length !== 12) return null;
+    return normalized.slice(-10);
+}
+
+// On-Demand Participant Account Lookup (Uses 10-min temporary memory cache to prevent duplicate reads on button click)
+async function lookupParticipantAccounts(senderPhone) {
+    const tenDigitPhone = extractTenDigitPhone(senderPhone);
+    if (!tenDigitPhone) return [];
+
+    const cached = participantSessionCache.get(tenDigitPhone);
+    if (cached && (Date.now() - cached.timestamp < PARTICIPANT_CACHE_TTL_MS)) {
+        return cached.accounts;
+    }
+
+    try {
+        const snap = await db.collection('users').where('phone', '==', tenDigitPhone).get();
+        const accounts = [];
+        snap.forEach(docSnap => {
+            const data = docSnap.data() || {};
+            accounts.push({
+                id: docSnap.id,
+                name: (data.name || 'PARTICIPANT').toUpperCase(),
+                groupId: (data.groupId || 'N/A').toUpperCase()
+            });
+        });
+
+        participantSessionCache.set(tenDigitPhone, {
+            accounts: accounts,
+            timestamp: Date.now()
+        });
+
+        return accounts;
+    } catch (err) {
+        console.error(`[PARTICIPANT LOOKUP ERROR] Failed querying phone ${tenDigitPhone}:`, err.message);
+        return [];
+    }
 }
 
 function chunkArray(array, size) {
@@ -1368,21 +1415,55 @@ app.post('/webhook', async (req, res) => {
                         
                         if (buttonId === 'view_ledger_btn') {
                             console.log(`[INBOUND] View Ledger button clicked by ${senderPhone}`);
-                            const ledgerText = `📊 *உங்கள் கணக்கு விவரம்:*\nகீழே உள்ள லிங்கை கிளிக் செய்து, உங்கள் Account ID உள்ளிட்டு சரிபார்க்கவும். ✅\n\n🔗 https://tinyurl.com/meenachitfunds`;
-                            await sendFreeTextMessage(senderPhone, ledgerText);
+                            const participantAccounts = await lookupParticipantAccounts(senderPhone);
+
+                            if (participantAccounts.length > 0) {
+                                console.log(`[INBOUND] Dispatching ${participantAccounts.length} dynamic ledger card(s) to participant ${senderPhone}`);
+                                for (let idx = 0; idx < participantAccounts.length; idx++) {
+                                    const acc = participantAccounts[idx];
+                                    const dynamicLedgerCard =
+`📊 *Meena Chitfunds - கணக்கு விவரம்*
+
+👤 *Name:* ${acc.name}
+🏷️ *Group ID:* ${acc.groupId}
+🆔 *Account ID:* ${acc.id}
+
+🔗 *View Ledger & Pay:*
+https://corporationgoorac.github.io/ChitFunds/#${acc.id}`;
+
+                                    await sendFreeTextMessage(senderPhone, dynamicLedgerCard);
+
+                                    // Brief 1s pacing between multiple accounts so messages arrive strictly in order
+                                    if (idx < participantAccounts.length - 1) {
+                                        await wait(1000);
+                                    }
+                                }
+                            } else {
+                                const ledgerText = `📊 *உங்கள் கணக்கு விவரம்:*\nகீழே உள்ள லிங்கை கிளிக் செய்து, உங்கள் Account ID உள்ளிட்டு சரிபார்க்கவும். ✅\n\n🔗 https://tinyurl.com/meenachitfunds`;
+                                await sendFreeTextMessage(senderPhone, ledgerText);
+                            }
                             continue;
                         }
                     }
 
-                    // 2. CATCH-ALL FOR UNAUTHORIZED USERS (Text, Image, Audio, Document)
+                    // 2. CATCH-ALL FOR NON-ADMIN USERS (Registered Participants vs Unknown Numbers)
                     if (!isAuthorized) {
-                        console.warn(`[ACCESS DENIED] Unauthorized message/media from: ${senderPhone}`);
-                        
-                        let warningText = "இது ஒரு தானியங்கி சேவை, இங்கு உங்களால் நேரடியாக மெசேஜ் செய்ய முடியாது. 🚫\n\nஉங்கள் கணக்கு விவரங்களை அறிய கீழே உள்ள 'View Ledger' பட்டனை அழுத்தவும்.\nநிர்வாகியை தொடர்பு கொள்ள 'Contact' பட்டனை அழுத்தவும். 👇";
-                        
-                        // Switch phrasing if they send any form of media
-                        if (msg.type !== 'text') {
-                            warningText = "இது ஒரு தானியங்கி சேவை, இங்கு புகைப்படங்கள், வீடியோக்கள் அல்லது வாய்ஸ் மெசேஜ்களை அனுப்ப முடியாது. 🚫\n\nஉங்கள் கணக்கு விவரங்களை அறிய கீழே உள்ள 'View Ledger' பட்டனை அழுத்தவும்.\nநிர்வாகியை தொடர்பு கொள்ள 'Contact' பட்டனை அழுத்தவும். 👇";
+                        const participantAccounts = await lookupParticipantAccounts(senderPhone);
+                        let replyBodyText;
+
+                        if (participantAccounts.length > 0) {
+                            console.log(`[INBOUND PARTICIPANT] Recognized customer (${senderPhone}) with ${participantAccounts.length} account(s). Sending Tamil greeting.`);
+                            replyBodyText = "வணக்கம்! 🙏\n*Meena Chitfunds*-க்கு வரவேற்கிறோம்.\n\nஉங்கள் கணக்கு விவரங்களைப் பார்க்க கீழே உள்ள *'View Ledger'* பட்டனை அழுத்தவும்.\nநிர்வாகியைத் தொடர்பு கொள்ள *'Contact'* பட்டனை அழுத்தவும். 👇";
+                        } else {
+                            console.warn(`[ACCESS DENIED] Unauthorized message/media from: ${senderPhone}`);
+                            
+                            let warningText = "இது ஒரு தானியங்கி சேவை, இங்கு உங்களால் நேரடியாக மெசேஜ் செய்ய முடியாது. 🚫\n\nஉங்கள் கணக்கு விவரங்களை அறிய கீழே உள்ள 'View Ledger' பட்டனை அழுத்தவும்.\nநிர்வாகியை தொடர்பு கொள்ள 'Contact' பட்டனை அழுத்தவும். 👇";
+                            
+                            // Switch phrasing if they send any form of media
+                            if (msg.type !== 'text') {
+                                warningText = "இது ஒரு தானியங்கி சேவை, இங்கு புகைப்படங்கள், வீடியோக்கள் அல்லது வாய்ஸ் மெசேஜ்களை அனுப்ப முடியாது. 🚫\n\nஉங்கள் கணக்கு விவரங்களை அறிய கீழே உள்ள 'View Ledger' பட்டனை அழுத்தவும்.\nநிர்வாகியை தொடர்பு கொள்ள 'Contact' பட்டனை அழுத்தவும். 👇";
+                            }
+                            replyBodyText = warningText;
                         }
 
                         const interactivePayload = {
@@ -1392,7 +1473,7 @@ app.post('/webhook', async (req, res) => {
                             type: 'interactive',
                             interactive: {
                                 type: 'button',
-                                body: { text: warningText },
+                                body: { text: replyBodyText },
                                 action: {
                                     buttons: [
                                         {
@@ -1408,7 +1489,7 @@ app.post('/webhook', async (req, res) => {
                             }
                         };
                         await callMetaWhatsAppAPI(interactivePayload).catch(err => console.error('[AUTO-REPLY ERROR]', err));
-                        continue; // Stop processing completely for unauthorized users
+                        continue; // Stop processing completely for non-admin users
                     }
 
                     // --- 3. ADMIN ONLY ZONE ---
@@ -1711,12 +1792,17 @@ server.listen(PORT, () => {
     setInterval(() => runAutomatedGSTCheck(false), 600000); 
     setTimeout(() => runAutomatedGSTCheck(true), 45000); 
 
-    // ENTERPRISE MEMORY LEAK FAILSAFE (Clears orphaned RAM Tracker IDs older than 15 mins)
+    // ENTERPRISE MEMORY LEAK FAILSAFE (Clears orphaned RAM Tracker IDs older than 15 mins & Participant Session Cache older than 10 mins)
     setInterval(() => {
         const now = Date.now();
         for (const [msgId, record] of activeDispatchTracker.entries()) {
             if (now - record.timestamp > 15 * 60 * 1000) {
                 activeDispatchTracker.delete(msgId);
+            }
+        }
+        for (const [phoneKey, entry] of participantSessionCache.entries()) {
+            if (now - entry.timestamp > PARTICIPANT_CACHE_TTL_MS) {
+                participantSessionCache.delete(phoneKey);
             }
         }
     }, 5 * 60 * 1000);
